@@ -1,9 +1,10 @@
-"""Deep Q-Network Agent for Trading."""
+"""Deep Q-Network Agent for Trading - Optimized Version."""
 
 import numpy as np
 import tensorflow as tf
 from collections import deque
 from loguru import logger
+import os
 
 from config.settings import (
     STATE_SIZE, ACTION_SIZE, MEMORY_SIZE, BATCH_SIZE, GAMMA,
@@ -13,7 +14,7 @@ from config.settings import (
 
 
 class DQNAgent:
-    """Deep Q-Network Agent for autonomous trading."""
+    """Deep Q-Network Agent for autonomous trading - Optimized."""
     
     def __init__(self, state_size=STATE_SIZE, action_size=ACTION_SIZE):
         """Initialize DQN Agent.
@@ -53,20 +54,30 @@ class DQNAgent:
         logger.info(f"DQN Agent initialized - State: {state_size}, Actions: {action_size}")
     
     def _build_model(self):
-        """Build neural network model."""
+        """Build optimized neural network model."""
         model = tf.keras.Sequential([
-            tf.keras.layers.Dense(128, activation='relu', input_shape=(self.state_size,)),
+            # Input layer
+            tf.keras.layers.Input(shape=(self.state_size,)),
+            
+            # Hidden layers - أصغر وأسرع
+            tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+            tf.keras.layers.BatchNormalization(),
             tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(128, activation='relu'),
+            
+            tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+            tf.keras.layers.BatchNormalization(),
             tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(64, activation='relu'),
+            
+            tf.keras.layers.Dense(32, activation='relu'),
             tf.keras.layers.Dropout(0.1),
+            
+            # Output layer
             tf.keras.layers.Dense(self.action_size, activation='linear')
         ])
         
         model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate),
-            loss='mse'
+            loss=tf.keras.losses.Huber()  # أفضل من MSE للـ RL
         )
         
         return model
@@ -106,7 +117,7 @@ class DQNAgent:
         return action
     
     def replay(self, batch_size=None):
-        """Experience replay training.
+        """Experience replay training - Optimized.
         
         Args:
             batch_size: Size of batch to train on
@@ -124,25 +135,31 @@ class DQNAgent:
         indices = np.random.choice(len(self.memory), batch_size, replace=False)
         batch = [self.memory[i] for i in indices]
         
-        states = np.array([x[0] for x in batch])
+        states = np.array([x[0] for x in batch], dtype=np.float32)
         actions = np.array([x[1] for x in batch])
-        rewards = np.array([x[2] for x in batch])
-        next_states = np.array([x[3] for x in batch])
+        rewards = np.array([x[2] for x in batch], dtype=np.float32)
+        next_states = np.array([x[3] for x in batch], dtype=np.float32)
         dones = np.array([x[4] for x in batch])
         
-        # Predict Q-values
-        targets = self.model.predict(states, verbose=0)
-        next_q_values = self.target_model.predict(next_states, verbose=0)
+        # Predict Q-values - batch processing أسرع
+        with tf.GradientTape() as tape:
+            targets = self.model(states, training=True)
+            next_q_values = self.target_model(next_states, training=False)
+            
+            # حساب targets
+            target_values = targets.numpy().copy()
+            for i in range(batch_size):
+                if dones[i]:
+                    target_values[i][actions[i]] = rewards[i]
+                else:
+                    target_values[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q_values[i].numpy())
+            
+            # حساب loss
+            loss = tf.keras.losses.Huber()(targets, target_values)
         
-        for i in range(batch_size):
-            if dones[i]:
-                targets[i][actions[i]] = rewards[i]
-            else:
-                targets[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q_values[i])
-        
-        # Train model
-        history = self.model.fit(states, targets, epochs=1, verbose=0)
-        loss = history.history['loss'][0]
+        # تطبيق gradient
+        gradients = tape.gradient(loss, self.model.trainable_weights)
+        self.model.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
         
         # Decay exploration rate
         if self.epsilon > self.epsilon_min:
@@ -158,18 +175,41 @@ class DQNAgent:
         if self.steps % self.update_target_freq == 0:
             self.update_target_model()
         
-        return loss
+        return float(loss.numpy())
     
     def save(self, filepath):
-        """Save model to file."""
-        self.model.save(filepath)
+        """Save model to file - بدون مشاكل serialization."""
+        # إنشاء المجلد إذا ما كانش موجود
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # حفظ الأوزان بدل الـ model كامل
+        self.model.save_weights(filepath.replace('.h5', '_weights.h5'))
+        
+        # حفظ config
+        import json
+        config = {
+            'state_size': self.state_size,
+            'action_size': self.action_size,
+            'epsilon': float(self.epsilon)
+        }
+        with open(filepath.replace('.h5', '_config.json'), 'w') as f:
+            json.dump(config, f)
+        
         logger.info(f"Model saved to {filepath}")
     
     def load(self, filepath):
         """Load model from file."""
-        self.model = tf.keras.models.load_model(filepath)
-        self.target_model = tf.keras.models.load_model(filepath)
-        logger.info(f"Model loaded from {filepath}")
+        try:
+            # تحميل الأوزان
+            weights_file = filepath.replace('.h5', '_weights.h5')
+            if os.path.exists(weights_file):
+                self.model.load_weights(weights_file)
+                self.target_model.load_weights(weights_file)
+                logger.info(f"Model loaded from {weights_file}")
+            else:
+                logger.warning(f"Weights file not found: {weights_file}")
+        except Exception as e:
+            logger.error(f"Failed to load model: {str(e)}")
     
     def get_memory_size(self):
         """Get current memory size."""
