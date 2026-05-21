@@ -5,7 +5,7 @@ from loguru import logger
 from config.settings import (
     INITIAL_BALANCE, MAX_ACCOUNT_LOSS_PERCENT, DAILY_DRAWDOWN_LIMIT,
     MAX_POSITION_SIZE, SLIPPAGE_PERCENT, COMMISSION_PERCENT,
-    STOP_LOSS_PERCENT, TAKE_PROFIT_PERCENT
+    STOP_LOSS_PERCENT, TAKE_PROFIT_PERCENT, STATE_SIZE
 )
 
 
@@ -42,6 +42,9 @@ class TradingEnvironment:
         self.current_step = 0
         self.day_open_balance = initial_balance
         
+        # Price history for features
+        self.price_history = list(data[:100]) if len(data) >= 100 else list(data)
+        
         logger.info(f"Trading environment initialized - Balance: ${initial_balance}")
     
     def reset(self):
@@ -56,23 +59,77 @@ class TradingEnvironment:
         self.daily_returns = []
         self.current_step = 0
         self.day_open_balance = self.initial_balance
+        self.price_history = list(self.data[:100]) if len(self.data) >= 100 else list(self.data)
         
         return self._get_state()
     
     def _get_state(self):
-        """Get current state vector."""
+        """Get current state vector of size 64."""
         if self.current_step < len(self.data):
             price = self.data[self.current_step]
         else:
             price = self.data[-1]
         
-        # Normalize state
-        state = np.array([
-            self.balance / self.initial_balance,
-            self.portfolio_value / self.initial_balance,
-            price / self.data[0] if self.data[0] != 0 else 1,
-            1 if self.position > 0 else (-1 if self.position < 0 else 0),
-        ])
+        # Create state vector of size 64
+        state = np.zeros(STATE_SIZE, dtype=np.float32)
+        
+        # Core metrics (indices 0-9)
+        state[0] = self.balance / self.initial_balance  # Normalized balance
+        state[1] = self.portfolio_value / self.initial_balance  # Portfolio value
+        state[2] = price / self.data[0] if self.data[0] != 0 else 1  # Normalized price
+        state[3] = 1 if self.position > 0 else (-1 if self.position < 0 else 0)  # Position
+        state[4] = self.position_size / self.balance if self.balance > 0 else 0  # Position ratio
+        state[5] = self.entry_price / price if price > 0 else 0  # Entry vs current price
+        state[6] = (self.portfolio_value - self.initial_balance) / self.initial_balance  # Return
+        state[7] = (self.max_loss - (self.initial_balance - self.portfolio_value)) / self.max_loss if self.max_loss > 0 else 0
+        state[8] = len(self.trades)  # Trade count
+        state[9] = self.current_step / len(self.data)  # Progress
+        
+        # Price history features (indices 10-39)
+        if len(self.price_history) > 0:
+            # Recent prices
+            for i in range(min(10, len(self.price_history))):
+                idx = min(i + 10, STATE_SIZE - 1)
+                state[idx] = self.price_history[-(i+1)] / price if price > 0 else 0
+            
+            # Price statistics
+            prices_array = np.array(self.price_history[-30:]) if len(self.price_history) >= 30 else np.array(self.price_history)
+            if len(prices_array) > 0:
+                state[20] = np.mean(prices_array) / price if price > 0 else 0  # SMA
+                state[21] = np.std(prices_array) / price if price > 0 else 0  # Volatility
+                state[22] = (np.max(prices_array) - price) / price if price > 0 else 0  # Distance to max
+                state[23] = (price - np.min(prices_array)) / price if price > 0 else 0  # Distance to min
+        
+        # Returns and momentum (indices 24-39)
+        if len(self.price_history) >= 2:
+            returns = np.diff(self.price_history[-30:])
+            if len(returns) > 0:
+                state[24] = np.mean(returns) / price if price > 0 else 0
+                state[25] = np.std(returns) / price if price > 0 else 0
+        
+        # Equity history features (indices 40-59)
+        if len(self.equity_history) > 0:
+            equity_array = np.array(self.equity_history[-20:])
+            if len(equity_array) > 0:
+                state[40] = np.mean(equity_array) / self.initial_balance
+                state[41] = np.std(equity_array) / self.initial_balance
+                state[42] = (np.max(equity_array) - self.portfolio_value) / self.initial_balance
+                state[43] = (self.portfolio_value - np.min(equity_array)) / self.initial_balance
+        
+        # Win rate and trade stats (indices 44-59)
+        if len(self.trades) > 0:
+            wins = sum(1 for t in self.trades if t['profit'] > 0)
+            state[44] = wins / len(self.trades)  # Win rate
+            state[45] = np.mean([t['profit'] for t in self.trades]) / self.initial_balance
+        
+        # Risk metrics (indices 60-63)
+        state[60] = (self.initial_balance - self.portfolio_value) / self.max_loss if self.max_loss > 0 else 0
+        state[61] = (self.day_open_balance - self.portfolio_value) / self.daily_drawdown_limit if self.daily_drawdown_limit > 0 else 0
+        state[62] = (price - np.min(self.price_history)) / price if len(self.price_history) > 0 and price > 0 else 0
+        state[63] = (np.max(self.price_history) - price) / price if len(self.price_history) > 0 and price > 0 else 0
+        
+        # Replace any NaN or Inf values with 0
+        state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
         
         return state
     
@@ -102,6 +159,11 @@ class TradingEnvironment:
         
         current_price = self.data[self.current_step]
         old_portfolio = self.portfolio_value
+        
+        # Update price history
+        self.price_history.append(current_price)
+        if len(self.price_history) > 100:
+            self.price_history.pop(0)
         
         # Apply slippage
         if action == 0:  # Buy
