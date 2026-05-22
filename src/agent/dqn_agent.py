@@ -55,29 +55,29 @@ class DQNAgent:
     
     def _build_model(self):
         """Build optimized neural network model."""
-        model = tf.keras.Sequential([
-            # Input layer
-            tf.keras.layers.Input(shape=(self.state_size,)),
-            
-            # Hidden layers - أصغر وأسرع
-            tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
-            tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.Dropout(0.2),
-            
-            tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
-            tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.Dropout(0.2),
-            
-            tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.Dropout(0.1),
-            
-            # Output layer
-            tf.keras.layers.Dense(self.action_size, activation='linear')
-        ])
+        model = tf.keras.Sequential()
+        
+        # Input layer
+        model.add(tf.keras.layers.Input(shape=(self.state_size,)))
+        
+        # Hidden layers
+        model.add(tf.keras.layers.Dense(64, activation='relu'))
+        model.add(tf.keras.layers.BatchNormalization())
+        model.add(tf.keras.layers.Dropout(0.2))
+        
+        model.add(tf.keras.layers.Dense(64, activation='relu'))
+        model.add(tf.keras.layers.BatchNormalization())
+        model.add(tf.keras.layers.Dropout(0.2))
+        
+        model.add(tf.keras.layers.Dense(32, activation='relu'))
+        model.add(tf.keras.layers.Dropout(0.1))
+        
+        # Output layer
+        model.add(tf.keras.layers.Dense(self.action_size, activation='linear'))
         
         model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate),
-            loss=tf.keras.losses.Huber()  # أفضل من MSE للـ RL
+            loss=tf.keras.losses.Huber()
         )
         
         return model
@@ -141,25 +141,20 @@ class DQNAgent:
         next_states = np.array([x[3] for x in batch], dtype=np.float32)
         dones = np.array([x[4] for x in batch])
         
-        # Predict Q-values - batch processing أسرع
-        with tf.GradientTape() as tape:
-            targets = self.model(states, training=True)
-            next_q_values = self.target_model(next_states, training=False)
-            
-            # حساب targets
-            target_values = targets.numpy().copy()
-            for i in range(batch_size):
-                if dones[i]:
-                    target_values[i][actions[i]] = rewards[i]
-                else:
-                    target_values[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q_values[i].numpy())
-            
-            # حساب loss
-            loss = tf.keras.losses.Huber()(targets, target_values)
+        # Predict Q-values
+        targets = self.model.predict(states, verbose=0)
+        next_q_values = self.target_model.predict(next_states, verbose=0)
         
-        # تطبيق gradient
-        gradients = tape.gradient(loss, self.model.trainable_weights)
-        self.model.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
+        # حساب targets
+        for i in range(batch_size):
+            if dones[i]:
+                targets[i][actions[i]] = rewards[i]
+            else:
+                targets[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q_values[i])
+        
+        # Train model
+        history = self.model.fit(states, targets, epochs=1, verbose=0, batch_size=32)
+        loss = history.history['loss'][0] if isinstance(history.history['loss'], list) else history.history['loss']
         
         # Decay exploration rate
         if self.epsilon > self.epsilon_min:
@@ -175,39 +170,20 @@ class DQNAgent:
         if self.steps % self.update_target_freq == 0:
             self.update_target_model()
         
-        return float(loss.numpy())
+        return float(loss)
     
     def save(self, filepath):
-        """Save model to file - بدون مشاكل serialization."""
-        # إنشاء المجلد إذا ما كانش موجود
+        """Save model to file."""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
-        # حفظ الأوزان بدل الـ model كامل
-        self.model.save_weights(filepath.replace('.h5', '_weights.h5'))
-        
-        # حفظ config
-        import json
-        config = {
-            'state_size': self.state_size,
-            'action_size': self.action_size,
-            'epsilon': float(self.epsilon)
-        }
-        with open(filepath.replace('.h5', '_config.json'), 'w') as f:
-            json.dump(config, f)
-        
+        self.model.save(filepath)
         logger.info(f"Model saved to {filepath}")
     
     def load(self, filepath):
         """Load model from file."""
         try:
-            # تحميل الأوزان
-            weights_file = filepath.replace('.h5', '_weights.h5')
-            if os.path.exists(weights_file):
-                self.model.load_weights(weights_file)
-                self.target_model.load_weights(weights_file)
-                logger.info(f"Model loaded from {weights_file}")
-            else:
-                logger.warning(f"Weights file not found: {weights_file}")
+            self.model = tf.keras.models.load_model(filepath)
+            self.target_model = tf.keras.models.load_model(filepath)
+            logger.info(f"Model loaded from {filepath}")
         except Exception as e:
             logger.error(f"Failed to load model: {str(e)}")
     
