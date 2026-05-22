@@ -18,6 +18,67 @@ class DataProcessor:
         self.scaler = StandardScaler() if FEATURE_SCALING == 'standard' else MinMaxScaler()
         logger.info(f"DataProcessor initialized with {FEATURE_SCALING} scaling")
     
+    def generate_sample_data(self, num_samples=5000):
+        """Generate synthetic market data for testing.
+        
+        Args:
+            num_samples: Number of data points to generate
+            
+        Returns:
+            numpy array of price data
+        """
+        # Generate synthetic price data with realistic market behavior
+        prices = np.zeros(num_samples)
+        prices[0] = 2050.0  # Starting XAUUSD price
+        
+        for i in range(1, num_samples):
+            # Random walk with drift
+            change = np.random.normal(0, 0.5)  # Mean 0, Std 0.5
+            trend = 0.01  # Small upward trend
+            prices[i] = prices[i-1] * (1 + trend/100 + change/1000)
+        
+        # Ensure realistic price range
+        prices = np.clip(prices, 1950, 2150)
+        
+        logger.info(f"Generated {num_samples} sample prices - Range: ${prices.min():.2f}-${prices.max():.2f}")
+        return prices
+    
+    def generate_ohlcv_data(self, num_samples=5000):
+        """Generate synthetic OHLCV data.
+        
+        Args:
+            num_samples: Number of candles to generate
+            
+        Returns:
+            DataFrame with OHLCV data
+        """
+        data = []
+        price = 2050.0
+        
+        for i in range(num_samples):
+            # Generate intraday volatility
+            daily_change = np.random.normal(0, 10)
+            
+            open_price = price
+            close_price = price + daily_change
+            high_price = max(open_price, close_price) + abs(np.random.normal(0, 5))
+            low_price = min(open_price, close_price) - abs(np.random.normal(0, 5))
+            volume = np.random.randint(100000, 1000000)
+            
+            data.append({
+                'open': open_price,
+                'high': high_price,
+                'low': low_price,
+                'close': close_price,
+                'volume': volume
+            })
+            
+            price = close_price
+        
+        df = pd.DataFrame(data)
+        logger.info(f"Generated OHLCV data - {num_samples} candles")
+        return df
+    
     @staticmethod
     def calculate_rsi(prices, period=RSI_PERIOD):
         """Calculate Relative Strength Index."""
